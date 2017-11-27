@@ -199,6 +199,17 @@
             <version>${zeroturnaround.zip.version}</version>
             <type>jar</type>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-function-adapter-azure</artifactId>
+            <version>1.0.0.BUILD-SNAPSHOT</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-databind</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
 
         <!-- TEST -->
         <dependency>

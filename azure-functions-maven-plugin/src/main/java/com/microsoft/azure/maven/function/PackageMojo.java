@@ -6,26 +6,45 @@
 
 package com.microsoft.azure.maven.function;
 
+import java.io.File;
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.microsoft.azure.maven.Utils;
+import com.microsoft.azure.maven.function.bindings.BaseBinding;
+import com.microsoft.azure.maven.function.bindings.BindingFactory;
 import com.microsoft.azure.maven.function.configurations.FunctionConfiguration;
 import com.microsoft.azure.maven.function.handlers.AnnotationHandler;
 import com.microsoft.azure.maven.function.handlers.AnnotationHandlerImpl;
+import com.microsoft.azure.serverless.functions.annotation.AuthorizationLevel;
+import com.microsoft.azure.serverless.functions.annotation.HttpOutput;
+import com.microsoft.azure.serverless.functions.annotation.HttpTrigger;
 import org.apache.maven.model.Resource;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
+import org.reflections.Reflections;
+import org.reflections.scanners.MethodParameterScanner;
+import org.reflections.scanners.SubTypesScanner;
+import org.reflections.util.ConfigurationBuilder;
 
-import java.io.File;
-import java.io.IOException;
-import java.lang.reflect.Method;
-import java.net.URL;
-import java.nio.file.Paths;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import org.springframework.cloud.function.adapter.azure.AzureSpringBootRequestHandler;
 
 /**
  * Generate configuration files (host.json, function.json etc.) and copy JARs to staging directory.
@@ -56,13 +75,43 @@ public class PackageMojo extends AbstractFunctionMojo {
 
     @Override
     protected void doExecute() throws Exception {
-        final AnnotationHandler handler = getAnnotationHandler();
 
-        final Set<Method> methods = findAnnotatedMethods(handler);
+        final Set<Method> functionMethods = findFunctions(getClassUrl());
+        Class<? extends AzureSpringBootRequestHandler> handlerClass = getHandlerClass(getClassUrl()).iterator().next();
 
-        final Map<String, FunctionConfiguration> configMap = getFunctionConfigurations(handler, methods);
+        Method functionMethod = functionMethods.iterator().next();
+        ParameterizedType genericReturnType = (ParameterizedType)functionMethod.getGenericReturnType();
+        Type[] actualTypeArguments = genericReturnType.getActualTypeArguments();
 
-        validateFunctionConfigurations(configMap);
+        Method[] handlerClassMethods = handlerClass.getMethods();
+
+        FunctionConfiguration functionConfiguration = new FunctionConfiguration();
+        functionConfiguration.setScriptFile(getScriptFilePath());
+
+        Stream<Method> methodStream = Stream.of(handlerClassMethods)
+                .filter(m -> m.getReturnType().getCanonicalName().equals(actualTypeArguments[1].getTypeName()));
+
+        Optional<Method> first = methodStream.findFirst();
+        if (first.isPresent()) {
+            Method handlerMethod = first.get();
+            Class<?>[] parameterTypes1 = handlerMethod.getParameterTypes();
+            Stream<Class<?>> classStream = Stream.of(parameterTypes1)
+                    .filter(cl -> cl.getCanonicalName().equals(actualTypeArguments[0].getTypeName()));
+            if(classStream.findFirst().isPresent()) {
+                functionConfiguration.setEntryPoint(handlerClass.getCanonicalName() + "." + handlerMethod.getName());
+            }
+            else {
+                error("No entry methods are found.");
+            }
+        }
+
+        List<BaseBinding> bindings = functionConfiguration.getBindings();
+
+        bindings.add(BindingFactory.getBinding(new MyHttpTrigger()));
+        bindings.add(BindingFactory.getBinding(new MyHttpOutput()));
+
+        final Map<String, FunctionConfiguration> configMap = new HashMap<>();
+        configMap.put(functionMethods.iterator().next().getName(), functionConfiguration);
 
         final ObjectWriter objectWriter = getObjectWriter();
 
@@ -74,6 +123,29 @@ public class PackageMojo extends AbstractFunctionMojo {
 
         info(BUILD_SUCCESS);
     }
+
+    public Set<Method> findFunctions(final URL url) {
+        return new Reflections(
+                new ConfigurationBuilder()
+                        .addUrls(url)
+                        .addScanners(new MethodParameterScanner())
+                        .addClassLoader(getClassLoader(url)))
+                .getMethodsReturn(Function.class);
+    }
+
+    public Set<Class<? extends AzureSpringBootRequestHandler>> getHandlerClass(final URL url) {
+        return new Reflections(
+                new ConfigurationBuilder()
+                        .addUrls(url)
+                        .addScanners(new SubTypesScanner())
+                        .addClassLoader(getClassLoader(url)))
+                .getSubTypesOf(AzureSpringBootRequestHandler.class);
+    }
+
+    protected ClassLoader getClassLoader(final URL url) {
+        return new URLClassLoader(new URL[]{url}, this.getClass().getClassLoader());
+    }
+
 
     //endregion
 
@@ -120,6 +192,7 @@ public class PackageMojo extends AbstractFunctionMojo {
                 .append("..")
                 .append(File.separator)
                 .append(getFinalName())
+                .append("-azure")
                 .append(".jar")
                 .toString();
     }
@@ -209,6 +282,63 @@ public class PackageMojo extends AbstractFunctionMojo {
         resource.setFiltering(false);
         resource.setIncludes(Arrays.asList("*.jar"));
         return Arrays.asList(resource);
+    }
+
+    private static class MyHttpOutput implements HttpOutput {
+
+        @Override
+        public String name() {
+            return "$return";
+        }
+
+        @Override
+        public String dataType() {
+            return "";
+        }
+
+        @Override
+        public Class<? extends Annotation> annotationType() {
+            return HttpOutput.class;
+        }
+    }
+
+    private static class MyHttpTrigger implements HttpTrigger {
+
+        @Override
+		public Class<? extends Annotation> annotationType() {
+			return HttpTrigger.class;
+		}
+
+        @Override
+		public String name() {
+			return "req";
+		}
+
+        @Override
+		public String dataType() {
+			return "";
+		}
+
+        @Override
+		public String route() {
+			return "";
+		}
+
+        @Override
+		public String[] methods() {
+			return new String[]{"get", "post"};
+		}
+
+        @Override
+		public AuthorizationLevel authLevel() {
+			return AuthorizationLevel.ANONYMOUS;
+		}
+
+        @Override
+		public String webHookType() {
+			return "";
+		}
+
     }
 
     //endregion
